@@ -43,6 +43,7 @@ const hasGlobal = args.includes('--global') || args.includes('-g');
 const hasLocal = args.includes('--local') || args.includes('-l');
 const hasHelp = args.includes('--help') || args.includes('-h');
 const skipClaudeMd = args.includes('--skip-claude-md');
+const hasSkillsDir = args.includes('--skills-dir');
 
 // Parse --config-dir argument
 function parseConfigDirArg() {
@@ -63,6 +64,21 @@ function parseConfigDirArg() {
 }
 const explicitConfigDir = parseConfigDirArg();
 
+// Parse --dir argument (used with --skills-dir)
+function parseSkillsDirArg() {
+  const dirIndex = args.findIndex(arg => arg === '--dir');
+  if (dirIndex !== -1) {
+    const nextArg = args[dirIndex + 1];
+    if (!nextArg || nextArg.startsWith('-')) {
+      console.error(`  ${yellow}--dir requires a path argument${reset}`);
+      process.exit(1);
+    }
+    return nextArg;
+  }
+  return null;
+}
+const explicitSkillsDir = parseSkillsDirArg();
+
 console.log(banner);
 
 // Show help if requested
@@ -73,6 +89,9 @@ if (hasHelp) {
     ${amber}-g, --global${reset}              Install globally (to ~/.claude and ~/.carl)
     ${amber}-l, --local${reset}               Install locally (to ./.claude and ./.carl)
     ${amber}-c, --config-dir <path>${reset}   Specify custom Claude config directory
+    ${amber}--skills-dir [--dir <path>]${reset}
+                              Install as a Claude Code skills-directory plugin.
+                              Target: --dir <path> or <cwd>/.claude/skills/carl/
     ${amber}--skip-claude-md${reset}          Don't modify CLAUDE.md
     ${amber}-h, --help${reset}                Show this help message
 
@@ -86,6 +105,10 @@ if (hasHelp) {
     ${dim}# Install to current project only${reset}
     npx carl-core --local
 
+    ${dim}# Install as a Claude Code skills-directory plugin${reset}
+    npx carl-core --skills-dir
+    npx carl-core --skills-dir --dir /path/to/.claude/skills/carl/
+
   ${yellow}What gets installed:${reset}
     hooks/carl-hook.py     - Rule injection hook (v2, JSON-based)
     .carl/carl.json        - Domain rules, decisions, config
@@ -93,6 +116,12 @@ if (hasHelp) {
     settings.json          - Hook registration (merged)
     .mcp.json              - MCP server registration
     CLAUDE.md              - CARL integration block (optional)
+
+  ${yellow}Skills-dir mode installs:${reset}
+    .claude-plugin/plugin.json   - Plugin manifest
+    commands/                    - CARL slash commands
+    hooks/ + hooks.json          - Hook files
+    mcp/ + .mcp.json             - MCP server files
 
   ${yellow}v1 Migration:${reset}
     If upgrading from v1 (flat-file manifest), run:
@@ -394,6 +423,125 @@ function install(isGlobal, addToClaudeMd = true) {
 }
 
 /**
+ * Rewrite framework path references in a file content string:
+ * @~/.claude/<x>-framework/ and @./.claude/<x>-framework/ -> ${CLAUDE_PLUGIN_ROOT}/<x>-framework/
+ */
+function rewriteFrameworkRefs(content) {
+  return content
+    .replace(/@~\/\.claude\/([\w-]+-framework)\//g, '${CLAUDE_PLUGIN_ROOT}/$1/')
+    .replace(/@\.\/\.claude\/([\w-]+-framework)\//g, '${CLAUDE_PLUGIN_ROOT}/$1/');
+}
+
+/**
+ * Install as a Claude Code skills-directory plugin.
+ *
+ * Layout inside targetDir (.claude/skills/carl/ by default):
+ *   .claude-plugin/plugin.json   -- plugin manifest
+ *   commands/                    -- CARL slash commands (if any)
+ *   hooks/carl-hook.py           -- hook script
+ *   hooks.json                   -- hook registration (uses ${CLAUDE_PLUGIN_ROOT})
+ *   mcp/                         -- MCP server files
+ *   .mcp.json                    -- MCP registration (uses ${CLAUDE_PLUGIN_ROOT})
+ */
+function installSkillsDir() {
+  const src = path.join(__dirname, '..');
+  const short = 'carl';
+
+  // Resolve target directory
+  const targetDir = explicitSkillsDir
+    ? path.resolve(expandTilde(explicitSkillsDir))
+    : path.join(process.cwd(), '.claude', 'skills', short);
+
+  console.log(`  Installing skills-dir plugin to ${amber}${targetDir}${reset}\n`);
+
+  // Read package.json for version + description
+  const pkgJson = JSON.parse(fs.readFileSync(path.join(src, 'package.json'), 'utf8'));
+
+  // 1. Create .claude-plugin/plugin.json
+  const pluginDir = path.join(targetDir, '.claude-plugin');
+  fs.mkdirSync(pluginDir, { recursive: true });
+  const pluginJson = {
+    name: short,
+    version: pkgJson.version,
+    description: pkgJson.description || 'Context Augmentation & Reinforcement Layer'
+  };
+  fs.writeFileSync(path.join(pluginDir, 'plugin.json'), JSON.stringify(pluginJson, null, 2));
+  console.log(`  ${green}✓${reset} Created .claude-plugin/plugin.json`);
+
+  // 2. Copy commands/ (if present in source)
+  const cmdsSrc = path.join(src, 'commands');
+  if (fs.existsSync(cmdsSrc)) {
+    copyDir(cmdsSrc, path.join(targetDir, 'commands'));
+    console.log(`  ${green}✓${reset} Copied commands/`);
+  }
+
+  // 3. Copy hooks/carl-hook.py
+  const hooksDest = path.join(targetDir, 'hooks');
+  fs.mkdirSync(hooksDest, { recursive: true });
+  const hookSrc = path.join(src, 'hooks', 'carl-hook.py');
+  fs.copyFileSync(hookSrc, path.join(hooksDest, 'carl-hook.py'));
+  fs.chmodSync(path.join(hooksDest, 'carl-hook.py'), '755');
+  console.log(`  ${green}✓${reset} Copied hooks/carl-hook.py`);
+
+  // 4. Write hooks.json with ${CLAUDE_PLUGIN_ROOT} reference
+  const hooksJson = {
+    UserPromptSubmit: [
+      {
+        hooks: [
+          {
+            type: 'command',
+            command: 'python3 ${CLAUDE_PLUGIN_ROOT}/hooks/carl-hook.py'
+          }
+        ]
+      }
+    ]
+  };
+  let hooksJsonStr = JSON.stringify(hooksJson, null, 2);
+  hooksJsonStr = rewriteFrameworkRefs(hooksJsonStr);
+  fs.writeFileSync(path.join(targetDir, 'hooks.json'), hooksJsonStr);
+  console.log(`  ${green}✓${reset} Wrote hooks.json`);
+
+  // 5. Copy mcp/ directory
+  const mcpSrc = path.join(src, 'mcp');
+  if (fs.existsSync(mcpSrc)) {
+    copyDir(mcpSrc, path.join(targetDir, 'mcp'));
+    console.log(`  ${green}✓${reset} Copied mcp/`);
+  }
+
+  // 6. Write .mcp.json with ${CLAUDE_PLUGIN_ROOT} reference
+  const mcpJson = {
+    mcpServers: {
+      'carl-mcp': {
+        command: 'node',
+        args: ['${CLAUDE_PLUGIN_ROOT}/mcp/index.js'],
+        type: 'stdio'
+      }
+    }
+  };
+  let mcpJsonStr = JSON.stringify(mcpJson, null, 2);
+  mcpJsonStr = rewriteFrameworkRefs(mcpJsonStr);
+  fs.writeFileSync(path.join(targetDir, '.mcp.json'), mcpJsonStr);
+  console.log(`  ${green}✓${reset} Wrote .mcp.json`);
+
+  console.log(`
+  ${green}Done!${reset} Skills-dir plugin installed.
+
+  ${amber}Next steps:${reset}
+    ${dim}• Loads as ${short}@skills-dir next session (no marketplace/install needed)${reset}
+    ${dim}• Requires workspace trust to activate${reset}
+    ${dim}• For Claude Code Cloud: commit the .claude/skills/${short}/ directory${reset}
+
+  ${amber}What's installed at:${reset} ${targetDir}
+    ${dim}.claude-plugin/plugin.json${reset}   - Plugin manifest
+    ${dim}commands/${reset}                    - CARL slash commands
+    ${dim}hooks/carl-hook.py${reset}           - Rule injection hook
+    ${dim}hooks.json${reset}                   - Hook registration
+    ${dim}mcp/${reset}                         - MCP server files
+    ${dim}.mcp.json${reset}                    - MCP registration
+`);
+}
+
+/**
  * Prompt for install location
  */
 function promptLocation() {
@@ -446,6 +594,8 @@ if (hasGlobal && hasLocal) {
 } else if (explicitConfigDir && hasLocal) {
   console.error(`  ${yellow}Cannot use --config-dir with --local${reset}`);
   process.exit(1);
+} else if (hasSkillsDir) {
+  installSkillsDir();
 } else if (hasGlobal) {
   install(true, !skipClaudeMd);
 } else if (hasLocal) {
