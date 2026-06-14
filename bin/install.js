@@ -428,8 +428,8 @@ function install(isGlobal, addToClaudeMd = true) {
  */
 function rewriteFrameworkRefs(content) {
   return content
-    .replace(/@~\/\.claude\/([\w-]+-framework)\//g, '${CLAUDE_PLUGIN_ROOT}/$1/')
-    .replace(/@\.\/\.claude\/([\w-]+-framework)\//g, '${CLAUDE_PLUGIN_ROOT}/$1/');
+    .replace(/@~\/\.claude\/([\w-]+-framework)\//g, '@${CLAUDE_PLUGIN_ROOT}/$1/')
+    .replace(/@\.\/\.claude\/([\w-]+-framework)\//g, '@${CLAUDE_PLUGIN_ROOT}/$1/');
 }
 
 /**
@@ -485,20 +485,22 @@ function installSkillsDir() {
 
   // 4. Write hooks.json with ${CLAUDE_PLUGIN_ROOT} reference
   const hooksJson = {
-    UserPromptSubmit: [
-      {
-        hooks: [
-          {
-            type: 'command',
-            command: 'python3 ${CLAUDE_PLUGIN_ROOT}/hooks/carl-hook.py'
-          }
-        ]
-      }
-    ]
+    hooks: {
+      UserPromptSubmit: [
+        {
+          hooks: [
+            {
+              type: 'command',
+              command: 'python3 ${CLAUDE_PLUGIN_ROOT}/hooks/carl-hook.py'
+            }
+          ]
+        }
+      ]
+    }
   };
   let hooksJsonStr = JSON.stringify(hooksJson, null, 2);
   hooksJsonStr = rewriteFrameworkRefs(hooksJsonStr);
-  fs.writeFileSync(path.join(targetDir, 'hooks.json'), hooksJsonStr);
+  fs.writeFileSync(path.join(hooksDest, 'hooks.json'), hooksJsonStr);
   console.log(`  ${green}✓${reset} Wrote hooks.json`);
 
   // 5. Copy mcp/ directory
@@ -593,6 +595,9 @@ if (hasGlobal && hasLocal) {
   process.exit(1);
 } else if (explicitConfigDir && hasLocal) {
   console.error(`  ${yellow}Cannot use --config-dir with --local${reset}`);
+  process.exit(1);
+} else if (hasSkillsDir && (hasGlobal || hasLocal)) {
+  console.error(`  ${yellow}Cannot combine --skills-dir with --global or --local${reset}`);
   process.exit(1);
 } else if (hasSkillsDir) {
   installSkillsDir();
